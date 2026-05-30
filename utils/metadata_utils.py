@@ -47,7 +47,7 @@ import sys
 PROJECT_ROOT = "/Workspace/Users/rohan.m.mukherjee@gmail.com/bfsi-lakehouse-databricks"
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-print(f"✓ Project root added to sys.path: {PROJECT_ROOT}")
+# print(f"[metadata_utils.py] Project root added to sys.path: {PROJECT_ROOT}")
 
 
 
@@ -172,9 +172,9 @@ def get_process_config(table_name:str, process_type:str) -> dict:
 # This should be applicatable from Silver+ layers, not bronze & should return a dataframe. noyt dictionary
 
 
-if __name__ == "__main__":
-    testing_table_name = "t_Client"
-    processing_table_details = get_table_config(table_name = testing_table_name)
-    print(processing_table_details)
-    processing_table_layer = get_process_config(processing_table_details['source_table_name'], process_type = 'BRONZE')
-    print(processing_table_layer)
+# if __name__ == "__main__":
+#     testing_table_name = "t_Client"
+#     processing_table_details = get_table_config(table_name = testing_table_name)
+#     print(processing_table_details)
+#     processing_table_layer = get_process_config(processing_table_details['source_table_name'], process_type = 'BRONZE')
+#     print(processing_table_layer)

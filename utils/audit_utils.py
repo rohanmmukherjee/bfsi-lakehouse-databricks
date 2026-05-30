@@ -2,7 +2,7 @@ import sys
 PROJECT_ROOT = "/Workspace/Users/rohan.m.mukherjee@gmail.com/bfsi-lakehouse-databricks"
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-print(f"✓ Project root added to sys.path: {PROJECT_ROOT}")
+# print(f"[audit_utils.py] Project root added to sys.path: {PROJECT_ROOT}")
 
 
 
@@ -63,7 +63,17 @@ def start_etl_run(
                             "created_by":triggered_by
                         })
         
-        logger.info(f"[start_etl_run] run_id={current_run_id} | pipeline={pipeline_name} | prcoess_type={process_type} | dt={run_dt} | status=STARTED")
+        logger.info(
+                    # "\n"
+                    # + "=" * 80
+                    "[PIPELINE START]"
+                    + "\n" + "=" * 80
+                    + f"\n{" " * 15} >>> run_id    : {current_run_id}"
+                    + f"\n{" " * 15} >>> pipeline  : {pipeline_name}"
+                    + f"\n{" " * 15} >>> dt        : {run_dt}"
+                    + f"\n{" " * 15} >>> status    : STARTED"
+                    + "\n" + "=" * 80
+                )
         return current_run_id
     
     except Exception as e:
@@ -81,7 +91,7 @@ def log_table_start(
     run_dt: str,
     delta_version_before: int | None = None,
     triggered_by = "manual"
-) -> str:
+) -> dict:
     """
     Insert new row into etl_process_log with status='STARTED'.
     Returns: log_id (UUID string)
@@ -106,8 +116,16 @@ def log_table_start(
                             "created_by":triggered_by
                         })
         
-        logger.info(f"[log_table_start] log_id={current_log_id} | table_name={table_name} | status=STARTED")
-        return current_log_id
+        logger.info(
+                    f"[TABLE START] {table_name}"
+                    + f"\n{" " * 15} >>> log_id    : {current_log_id}"
+                    + f"\n{" " * 15} >>> status    : STARTED"
+                    + "\n" + "-" * 80
+                )
+        return {
+                "table_name": table_name,
+                "current_log_id": current_log_id
+                }
     except Exception as e:
         logger.error(f"[log_table_start] FAILED | log_id={current_log_id} | error={e}")
         raise
@@ -116,9 +134,11 @@ def log_table_start(
 # ----====[LOGGIN HELPER FUNC 3 : Update log status for each table after every operation]=====-----------------------------------------------
 def log_table_end(
     log_id: str,
+    table_name:str,
     status: str,                    # 'SUCCESS' | 'FAILED' | 'SKIPPED'
     rows_read: int | None = None,
     rows_written: int | None = None,
+    delta_version_before: int | None = None,
     delta_version_after: int | None = None,
     error_message: str | None = None,
     error_stacktrace: str | None = None
@@ -133,6 +153,7 @@ def log_table_end(
                 SET status = :status,
                     rows_read = :rows_read,
                     rows_written = :rows_written,
+                    delta_version_before = :delta_version_before,
                     delta_version_after = :delta_version_after,
                     finished_at = current_timestamp(),
                     error_message = :error_message,
@@ -146,15 +167,25 @@ def log_table_end(
                             "status": status,
                             "rows_read": rows_read,
                             "rows_written": rows_written,
+                            "delta_version_before": delta_version_before,
                             "delta_version_after": delta_version_after,
                             "error_message": error_message,
                             "error_stacktrace":error_stacktrace
                         })
         
-        logger.info(f"[log_table_end] log_id={log_id} | status={status} | rows_read={rows_read} | rows_written={rows_written}")
+        logger.info(
+                    # "\n"
+                    # + "-" * 80
+                    f"[TABLE END] {table_name}"
+                    # + "\n" + "-" * 80
+                    + f"\n{" " * 15} >>> status         : {status}"
+                    + f"\n{" " * 15} >>> rows_read      : {rows_read}"
+                    + f"\n{" " * 15} >>> rows_written   : {rows_written}"
+                    + "\n" + "-" * 80
+                )
         return None
     except Exception as e:
-        logger.error(f"[log_table_end] FAILED | log_id={log_id} | error={e}")
+        logger.error(f"[log_table_end] FAILED | log_id={log_id} | table_name = {table_name}| error={e}")
         raise
 
 
@@ -193,6 +224,8 @@ def end_etl_run(
         skipped_count = log_status['skipped_count']
         total_tables = log_status['total_tables']
 
+        # if error_message =="" or error_message is None:
+        #     status = 'FAILED'
         if failed_count == 0:
             status = 'SUCCESS'
         elif failed_count == total_tables:
@@ -224,11 +257,40 @@ def end_etl_run(
                             "error_message": error_message
                         })
         
-        logger.info(f"[end_etl_run] run_id={run_id} | status={status} | total_tables={total_tables} | success_count={success_count} | failed_count={failed_count} | skipped_count={skipped_count}")
-        return None
+        logger.info(
+                    # "\n"
+                    # + "=" * 80
+                    "[PIPELINE END] FINAL STATUS"
+                    + "\n" + "=" * 80
+                    + f"\n{" " * 15} >>> run_id         : {run_id}"
+                    + f"\n{" " * 15} >>> status         : {status}"
+                    + f"\n{" " * 15} >>> total_tables   : {total_tables}"
+                    + f"\n{" " * 15} >>> success_count  : {success_count}"
+                    + f"\n{" " * 15} >>> failed_count   : {failed_count}"
+                    + f"\n{" " * 15} >>> skipped_count  : {skipped_count}"
+                    + "\n" + "=" * 80
+                )
+        return {
+                'run_id' : run_id,
+                'status' : status,
+                'total_tables' : total_tables,
+                'success_count' : success_count,
+                'failed_count' : failed_count,
+                'skipped_count' : skipped_count,
+                'error' : None
+                }
+        
     except Exception as e:
         logger.error(f"[end_etl_run] FAILED | run_id={run_id} | error={e}")
-        raise
+        return {
+                'run_id' : run_id,
+                'status' : 'FAILED',
+                'total_tables' : 0,
+                'success_count' : 0,
+                'failed_count' : 0,
+                'skipped_count' : 0,
+                'error' : str(e)
+                }
 
 
 # ----====[LOGGIN HELPER FUNC 5 : Log Schema drift changes]=====-----------------------------------------------

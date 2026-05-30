@@ -127,9 +127,9 @@ class LoadStatus(str, Enum):
 
 
 class ProcessType(str, Enum):
-    BRONZE_INGEST = "BRONZE_INGEST"
-    SILVER_BUILD  = "SILVER_BUILD"
-    GOLD_BUILD    = "GOLD_BUILD"
+    BRONZE_INGEST = "BRONZE"
+    SILVER_BUILD  = "SILVER"
+    GOLD_BUILD    = "GOLD"
 
 
 class LoadType(str, Enum):
@@ -169,7 +169,7 @@ SPARK_LOCAL: Final[SparkLocalConfig] = SparkLocalConfig()
 # ============================================================
 # 8. RUNTIME DEFAULTS / GUARDRAILS
 # ============================================================
-DEFAULT_TRIGGERED_BY:   Final[str] = "manual_notebook"
+DEFAULT_TRIGGERED_BY:   Final[str] = "scheduled_notebook"
 MAX_BACKFILL_DAYS:      Final[int] = 30        # safety cap on accidental long backfills
 DEFAULT_DRIFT_POLICY:   Final[DriftPolicy] = DriftPolicy.STRICT
 DEFAULT_LOAD_PRIORITY:  Final[int] = 100
