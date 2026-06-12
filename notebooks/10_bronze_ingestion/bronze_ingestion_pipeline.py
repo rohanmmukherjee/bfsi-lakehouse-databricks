@@ -60,7 +60,7 @@ def ingest_one_table(spark, log_id, table_name:str, run_dt) -> dict:
 
 
             # ------: Get Config Details
-            table_config_data = get_table_config(table_name = table_name)
+            table_config_data = get_table_config(table_name = table_name, process_type = cfg.ProcessType.BRONZE_INGEST.value)
             # print(f"table_config_data = {table_config_data}")
 
             table_process_config_data = get_process_config(table_name = table_name, process_type = cfg.ProcessType.BRONZE_INGEST.value)

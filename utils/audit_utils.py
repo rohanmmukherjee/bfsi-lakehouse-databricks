@@ -32,6 +32,7 @@ if not logger.handlers:
 # ----====[MASTER TABLES CONFIG]=====------------------------------------------------------------------------------------------------
 MASTER_TABLE = cfg.TBL_ETL_PROCESS_MASTER
 LOG_TABLE    = cfg.TBL_ETL_PROCESS_LOG
+SCHEMA_DRIFT_LOG  = cfg.TBL_SCHEMA_DRIFT_LOG
 
 
 # ----====[LOGGIN HELPER FUNC 1 : To insert a fresh log row whenever ETL starts.]=====-----------------------------------------------
@@ -294,5 +295,65 @@ def end_etl_run(
 
 
 # ----====[LOGGIN HELPER FUNC 5 : Log Schema drift changes]=====-----------------------------------------------
-# write_schema_drift_log()
+def write_schema_drift_log(
+    run_id: str,
+    table_id: int,
+    drift_events: list,
+    created_by: str = "manual"
+) -> None:
+    """
+    Persists drift events detected by enforce_schema() into schema_drift_log table.
+    One INSERT per event. Early-returns if drift_events is empty (no spark.sql call).
+
+    drift_events dict shape (from enforce_schema):
+        {
+            'column_name'      : str,
+            'column_data_type' : str | None,
+            'event_type'       : 'MISSING' | 'TYPE_CHANGED' | 'NEW',
+            'action_taken'     : 'REJECTED' | 'QUARANTINED' | 'AUTO_EVOLVED',
+            'reason'           : str           # IGNORED — not a table column
+        }
+    """
+    try:
+        # ------: STEP 1 — Empty check, return early
+        if not drift_events:
+            logger.info(f"[write_schema_drift_log] No drift events to log | run_id={run_id} | table_id={table_id}")
+            return None
+
+        # ------: STEP 2 — Loop, one INSERT per event
+        for event in drift_events:
+            current_drift_log_id = str(uuid.uuid4())
+
+            spark.sql(f"""
+                    INSERT INTO {SCHEMA_DRIFT_LOG}
+                    (drift_log_id, run_id, table_id, column_name, column_data_type,
+                     event_type, action_taken, detected_at, created_by, created_at, updated_at)
+                    VALUES (:drift_log_id, :run_id, :table_id, :column_name, :column_data_type,
+                            :event_type, :action_taken, current_timestamp(),
+                            :created_by, current_timestamp(), current_timestamp())
+                    """, args={
+                                "drift_log_id"     : current_drift_log_id,
+                                "run_id"           : run_id,
+                                "table_id"         : table_id,
+                                "column_name"      : event['column_name'],
+                                "column_data_type" : event.get('column_data_type'),
+                                "event_type"       : event['event_type'],
+                                "action_taken"     : event['action_taken'],
+                                "created_by"       : created_by
+                            })
+
+        # ------: STEP 3 — Summary log outside the loop
+        logger.info(
+                    f"[SCHEMA DRIFT LOGGED]"
+                    + f"\n{' ' * 15} >>> run_id              : {run_id}"
+                    + f"\n{' ' * 15} >>> table_id            : {table_id}"
+                    + f"\n{' ' * 15} >>> drift_events_count  : {len(drift_events)}"
+                    + "\n" + "-" * 80
+                )
+
+        return None
+
+    except Exception as e:
+        logger.error(f"[write_schema_drift_log] FAILED | run_id={run_id} | table_id={table_id} | error={e}")
+        raise
      
