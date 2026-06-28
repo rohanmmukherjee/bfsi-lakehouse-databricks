@@ -150,6 +150,7 @@ def get_process_config(table_name:str, process_type:str) -> dict:
                         load_type,
                         depends_on_table_ids,
                         transform_module,
+                        write_strategy,
                         is_active
                     FROM {TABLE_PROCESS_CONFIG}
                     WHERE table_id = :current_table_id
@@ -210,13 +211,60 @@ def get_input_column_config(table_name:str, process_type:str) -> list[dict]:
     except Exception as e:
         logger.error(f"[{inspect.currentframe().f_code.co_name}] FAILED | error={e}")
         raise
+
+
+
+# ----====[LOGGIN HELPER FUNC 4 : GET TABLE WISE GROUPED COLUMN CONFIG]=====-------------------------------------------------------
+@lru_cache(maxsize=128)
+def get_column_purpose_groups(table_name: str, process_type: str) -> dict:
+    """
+    Returns columns grouped by column_purpose for a (table, layer).
+    
+    Returns dict:
+        {
+            'business_keys': [...],   # column_purpose = 'KEY'
+            'hash_cols':     [...],   # column_purpose = 'ATTRIBUTE'
+            'audit_cols':    [...],   # column_purpose = 'AUDIT'
+            'derived_cols':  [...]    # column_purpose = 'DERIVED'
+        }
+    
+    Each list contains target_column_name (falls back to source_column_name if NULL).
+    Filters is_active = true. Applicable for BRONZE / SILVER / GOLD.
+    """
+    try:
+        if process_type not in ['BRONZE', 'SILVER', 'GOLD']:
+            raise ValueError(f"Invalid process_type - '{process_type}'")
+        
+        config_rows = get_input_column_config(
+            table_name   = table_name,
+            process_type = process_type
+        )
+        
+        def target_name(r):
+            return r['target_column_name'] or r['source_column_name']
+        
+        groups = {
+            'business_keys': [target_name(r) for r in config_rows if r['column_purpose'] == 'KEY'],
+            'hash_cols':     [target_name(r) for r in config_rows if r['column_purpose'] == 'ATTRIBUTE'],
+            'audit_cols':    [target_name(r) for r in config_rows if r['column_purpose'] == 'AUDIT'],
+            'derived_cols':  [target_name(r) for r in config_rows if r['column_purpose'] == 'DERIVED'],
+        }
+        
+        return groups
+    
+    except Exception as e:
+        logger.error(f"[get_column_purpose_groups] FAILED | table={table_name} | layer={process_type} | error={e}")
+        raise
     
 
-if __name__ == "__main__":
-    testing_table_name = "t_Client"
+# if __name__ == "__main__":
+    # testing_table_name = "t_Client"
 #     processing_table_details = get_table_config(table_name = testing_table_name)
 #     print(processing_table_details)
 #     processing_table_layer = get_process_config(processing_table_details['source_table_name'], process_type = 'BRONZE')
 #     print(processing_table_layer)
-    processing_table_columns = get_input_column_config(testing_table_name, process_type = 'SILVER')
-    print(processing_table_columns)
+    # processing_table_columns = get_input_column_config(testing_table_name, process_type = 'SILVER')
+    # print(processing_table_columns)
+    # print(get_column_purpose_groups('t_Client', 'SILVER'))   # expect all 4 lists populated
+    # print(get_column_purpose_groups('t_Client', 'BRONZE'))   # expect empty lists or raise
+    # print(get_column_purpose_groups('t_BogusTable', 'SILVER'))  # expect raise

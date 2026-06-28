@@ -13,8 +13,11 @@ from enum import Enum
 from functools import reduce
 from operator import or_
 import re
+import inspect
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
+from pyspark.sql import DataFrame
+from pyspark.sql import Window
 spark = SparkSession.getActiveSession()
 if spark is None:
     raise RuntimeError(
@@ -148,77 +151,158 @@ def enforce_schema(table_name: str, df, config_rows, drift_policy: str):
 
 # ----====[LOGGIN HELPER FUNC 2 : To write quarantine dataframes to the quarantine table]=====-----------------------------------------------
 def write_to_quarantine(df_quarantine, source_table_name : str, run_id : str,log_id : str,run_dt : str,drift_events : list) -> dict:
+    try:
     
-    # ------: STEP 1 — Empty Check for Quarantine Dataframe
-    if df_quarantine is None or df_quarantine.isEmpty():
-        logger.info(f"[write_to_quarantine] No quarantine rows for {source_table_name} | run_dt={run_dt}")
+        # ------: STEP 1 — Empty Check for Quarantine Dataframe
+        if df_quarantine is None or df_quarantine.isEmpty():
+            logger.info(f"[write_to_quarantine] No quarantine rows for {source_table_name} | run_dt={run_dt}")
+            return {
+                'is_quarantined'   : False,
+                'quarantine_table' : source_table_name,
+                'run_id'           : run_id,
+                'log_id'           : log_id,
+                'run_dt'           : run_dt,
+                'quarantine_count' : 0
+            }
+        
+        # ------: STEP 1.5 — Derive quarantine reason
+        if not drift_events:
+            quarantine_reason = 'NULL_IN_NOT_NULL_COLUMN'
+        else:
+            quarantine_reason = next(   # first dict in drift_events that has a reason key" | fallback to NULL_IN_NOT_NULL_COLUMN if none found
+                (event.get('reason') for event in drift_events if event.get('reason')),
+                'NULL_IN_NOT_NULL_COLUMN'
+            )
+
+        # ------: STEP 2 — Stamp 4 trace columns
+        df_quarantine = (
+            df_quarantine
+            .withColumn('_quarantine_reason', F.lit(quarantine_reason))
+            .withColumn('_quarantined_at',    F.current_timestamp())
+            .withColumn('_run_id',            F.lit(run_id))
+            .withColumn('_log_id',            F.lit(log_id))
+        )
+
+        # ------: STEP 3 — Build target
+        target = f"bfsi_lakehouse.quarantine.{source_table_name}"
+
+        # ------: STEP 4 — Write
+        table_exists = spark.catalog.tableExists(target)
+        if not table_exists:
+            (
+                df_quarantine.write
+                .format("delta")
+                .mode("overwrite")          # plain overwrite, no replaceWhere needed
+                .partitionBy("dt")
+                .saveAsTable(target)
+            )
+        else:
+            (
+                df_quarantine.write
+                .format("delta")
+                .mode("overwrite")
+                .option("replaceWhere", f"dt = '{run_dt}'")
+                .partitionBy("dt")
+                .saveAsTable(target)
+            )
+
+        # ------: STEP 5 — Return status
+        quarantine_count = df_quarantine.count()
+        logger.info(f"[write_to_quarantine] {source_table_name} | quarantine_count={quarantine_count} | target={target} | run_dt={run_dt}")
+        
         return {
-            'is_quarantined'   : False,
+            'is_quarantined'   : True,
             'quarantine_table' : source_table_name,
             'run_id'           : run_id,
             'log_id'           : log_id,
             'run_dt'           : run_dt,
-            'quarantine_count' : 0
+            'quarantine_count' : quarantine_count
         }
+
+    except Exception as e:
+        logger.error(f"[write_to_quarantine] FAILED | error={e}")
+        raise
+
+
+
+# ----====[LOGGIN HELPER FUNC 3 : Handle duplicates for Merge =====-----------------------------------------------
+def dedup_for_merge(
+    df,                          # incoming Silver dataframe (post enforce_schema)
+    business_keys: list,         # from col_groups['business_keys']
+    order_by_col: str,           # e.g. 'LastUpdatedAt'
+    hash_cols: list              # from col_groups['hash_cols']
+) -> DataFrame:
+    """
+    Adds _row_hash column and deduplicates to one row per business_key (latest wins).
+    Output is MERGE-ready: unique on business_keys, fingerprinted via _row_hash.
+    """
+    try:
+
+        # ------: STEP 1 — Inputes Validation
+        if not business_keys:
+            raise ValueError(f"[{inspect.currentframe().f_code.co_name}] No business keys provided.")
+        if not order_by_col:
+            raise ValueError(f"[{inspect.currentframe().f_code.co_name}] No order_by_col provided.")
+        if not hash_cols:
+            raise ValueError(f"[{inspect.currentframe().f_code.co_name}] No hash_cols provided.")
+
+        missing_business_keys = [col for col in business_keys if col not in df.columns]
+        if missing_business_keys:
+            raise ValueError(f"[dedup_for_merge] Business key columns missing in df: {missing_business_keys}")
+
+        if order_by_col not in df.columns:
+            raise ValueError(f"[dedup_for_merge] order_by_col '{order_by_col}' not in df")
+
+        missing_hash_cols = [col for col in hash_cols if col not in df.columns]
+        if missing_hash_cols:
+            raise ValueError(f"[dedup_for_merge] Hash columns missing in df: {missing_hash_cols}")
+
+
+        # ------: STEP 2 — Build hash expression
+        sorted_hash_cols = sorted(hash_cols)
+        hash_input_cols = [F.coalesce(F.col(col).cast('string'), F.lit(''))
+                            for col in sorted_hash_cols]
+        hash_expr = F.sha2(
+            F.concat_ws('||', *hash_input_cols),
+            256
+        )
+        # print(f"hash_input_cols ---> {hash_input_cols}")
+        # print(f"hash_expr ---> {hash_expr}")
+
+        # ------: STEP 3 — Add hash column
+        df_with_hash = df.withColumn("_row_hash",hash_expr)
+        # print(df_with_hash['OurBranchID','ClientID','_row_hash'].head(5))
+
+        # ------: STEP 4 — Build Window
+        w = Window.partitionBy(*business_keys).orderBy(F.col(order_by_col).desc_nulls_last())
+
+        # ------: STEP 5 — Apply row_number + filter
+        df_dedup = (
+            df_with_hash
+            .withColumn('_rn', F.row_number().over(w))
+            .filter(F.col('_rn') == 1)
+            .drop('_rn')
+        )
+
+        logger.info(
+            f"[dedup_for_merge] "
+            + f"\n{' ' * 15} >>> business_keys = {business_keys}"
+            + f"\n{' ' * 15} >>> order_by_col  = {order_by_col}"
+            + f"\n{' ' * 15} >>> hash_cols     = {len(sorted_hash_cols)} columns"
+        )
+
+        return df_dedup
     
-    # ------: STEP 1.5 — Derive quarantine reason
-    if not drift_events:
-        quarantine_reason = 'NULL_IN_NOT_NULL_COLUMN'
-    else:
-        quarantine_reason = next(   # first dict in drift_events that has a reason key" | fallback to NULL_IN_NOT_NULL_COLUMN if none found
-            (event.get('reason') for event in drift_events if event.get('reason')),
-            'NULL_IN_NOT_NULL_COLUMN'
-        )
+    except Exception as e:
+        logger.error(f"[dedup_for_merge] FAILED | error={e}")
+        raise
 
-    # ------: STEP 2 — Stamp 4 trace columns
-    df_quarantine = (
-        df_quarantine
-        .withColumn('_quarantine_reason', F.lit(quarantine_reason))
-        .withColumn('_quarantined_at',    F.current_timestamp())
-        .withColumn('_run_id',            F.lit(run_id))
-        .withColumn('_log_id',            F.lit(log_id))
-    )
 
-    # ------: STEP 3 — Build target
-    target = f"bfsi_lakehouse.quarantine.{source_table_name}"
-
-    # ------: STEP 4 — Write
-    table_exists = spark.catalog.tableExists(target)
-    if not table_exists:
-        (
-            df_quarantine.write
-            .format("delta")
-            .mode("overwrite")          # plain overwrite, no replaceWhere needed
-            .partitionBy("dt")
-            .saveAsTable(target)
-        )
-    else:
-        (
-            df_quarantine.write
-            .format("delta")
-            .mode("overwrite")
-            .option("replaceWhere", f"dt = '{run_dt}'")
-            .partitionBy("dt")
-            .saveAsTable(target)
-        )
-
-    # ------: STEP 5 — Return status
-    quarantine_count = df_quarantine.count()
-    logger.info(f"[write_to_quarantine] {source_table_name} | quarantine_count={quarantine_count} | target={target} | run_dt={run_dt}")
-    
-    return {
-        'is_quarantined'   : True,
-        'quarantine_table' : source_table_name,
-        'run_id'           : run_id,
-        'log_id'           : log_id,
-        'run_dt'           : run_dt,
-        'quarantine_count' : quarantine_count
-    }
 
 
 if __name__ == "__main__":
     import config.settings as cfg
-    from utils.metadata_utils import (get_table_config,get_input_column_config)
+    from utils.metadata_utils import (get_table_config,get_input_column_config,get_column_purpose_groups)
 
     bronze_df = spark.table('bfsi_lakehouse.bronze.t_client').filter("dt = '2024-01-02'")
     config_columns_details = get_input_column_config(table_name = 't_Client', process_type = 'SILVER')
@@ -235,3 +319,18 @@ if __name__ == "__main__":
                         log_id = '12345',
                         run_dt = '2024-01-02',
                         drift_events = drift_events)
+
+    silver_purporse_groups = get_column_purpose_groups(table_name = 't_Client', process_type = 'SILVER')
+    silver_business_purpose_groups = silver_purporse_groups['business_keys']
+    silver_hash_purpose_groups = silver_purporse_groups['hash_cols']
+    silver_audit_purpose_groups = silver_purporse_groups['audit_cols']
+    silver_derived_purpose_groups = silver_purporse_groups['derived_cols']
+
+    df_dedup = dedup_for_merge(
+        df = df_valid,
+        business_keys = silver_business_purpose_groups,
+        order_by_col = 'LastUpdatedAt',
+        hash_cols = silver_hash_purpose_groups
+    )
+
+    print(df_dedup.head(5))

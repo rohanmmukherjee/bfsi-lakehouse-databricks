@@ -117,6 +117,10 @@ class DriftPolicy(str, Enum):
     EVOLVE     = "EVOLVE"
     QUARANTINE = "QUARANTINE"
 
+class WriteStrategy(str, Enum):
+    SCD2         = "SCD2"
+    UPSERT       = "UPSERT"
+    APPEND_MERGE = "APPEND_MERGE"
 
 class LoadStatus(str, Enum):
     STARTED   = "STARTED"
