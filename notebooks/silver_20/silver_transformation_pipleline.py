@@ -447,8 +447,8 @@ if __name__ == "__main__":
                         # trigger_type=cfg.TriggerType.BACKFILL.value,    # BACKFILL
                         triggered_by= cfg.DEFAULT_TRIGGERED_BY,         # 'manual_notebook'
                         load_type=cfg.LoadType.FULL.value,
-                        tables=['t_AccountTrx']
-                        # tables = None
+                        # tables=['t_AccountTrx']
+                        tables = None
                         )
     
     
