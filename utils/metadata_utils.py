@@ -47,7 +47,7 @@ import sys
 PROJECT_ROOT = "/Workspace/Users/rohan.m.mukherjee@gmail.com/bfsi-lakehouse-databricks"
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-print(f"✓ Project root added to sys.path: {PROJECT_ROOT}")
+# print(f"[metadata_utils.py] Project root added to sys.path: {PROJECT_ROOT}")
 
 
 
@@ -73,6 +73,7 @@ if not logger.handlers:
     logger.setLevel(logging.INFO)
 
 from functools import lru_cache
+import inspect
 
 # ----====[MASTER TABLES CONFIG]=====------------------------------------------------------------------------------------------------
 TABLE_CONFIG = cfg.TBL_TABLE_CONFIG
@@ -83,11 +84,14 @@ INPUT_COLUMN_CONFIG = cfg.TBL_INPUT_COLUMN_CONFIG
 
 # ----====[LOGGIN HELPER FUNC 1 : GET TABLE CONFIG]=====-------------------------------------------------------
 @lru_cache(maxsize=128) # 128 means it remembers maxium upto 128distinct table names | Cache memory lives inside notebook/cluster, altering table mid session doesn't affect.
-def get_table_config(table_name:str) -> dict:
+def get_table_config(table_name:str, process_type: str) -> dict:
     """
     Returns the table config for the given table name.
     """
     try:
+        if process_type not in ["BRONZE", "SILVER", "GOLD"]:
+            raise ValueError(f"[get_table_config] Invalid process_type -'{process_type}'")
+
         df = spark.sql(f"""
                     SELECT 
                         table_id,
@@ -104,8 +108,9 @@ def get_table_config(table_name:str) -> dict:
                         load_priority,
                         is_active
                     FROM {TABLE_CONFIG}
-                    WHERE source_table_name = :current_table"""
-                    ,args={"current_table": table_name}
+                    WHERE source_table_name = :current_table AND process_type = :process_type"""
+                    ,args={"current_table": table_name,
+                           "process_type": process_type}
                     )
         
         config_rows = df.collect()
@@ -119,13 +124,13 @@ def get_table_config(table_name:str) -> dict:
         return data
     
     except Exception as e:
-        logger.error(f"[get_table_config] FAILED | error={e}")
+        logger.error(f"[{inspect.currentframe().f_code.co_name}] FAILED | error={e}")
         raise
 # get_table_config.cache_clear() # to clear cache memory when needed.
 
 
 
-# ----====[LOGGIN HELPER FUNC 2 : GET PROCESS CONFIG]=====-------------------------------------------------------
+# ----====[LOGGIN HELPER FUNC 2 : GET TABLE PROCESS CONFIG]=====-------------------------------------------------------
 @lru_cache(maxsize=128)
 def get_process_config(table_name:str, process_type:str) -> dict:
     """
@@ -133,9 +138,9 @@ def get_process_config(table_name:str, process_type:str) -> dict:
     """
     try:
         if process_type not in ["BRONZE", "SILVER", "GOLD"]:
-            raise ValueError(f"Invalid process_type -'{process_type}'")
+            raise ValueError(f"[get_process_config] Invalid process_type -'{process_type}'")
 
-        table_config = get_table_config(table_name)
+        table_config = get_table_config(table_name, process_type = process_type)
         table_id = table_config["table_id"]
                              
         df = spark.sql(f"""
@@ -145,6 +150,7 @@ def get_process_config(table_name:str, process_type:str) -> dict:
                         load_type,
                         depends_on_table_ids,
                         transform_module,
+                        write_strategy,
                         is_active
                     FROM {TABLE_PROCESS_CONFIG}
                     WHERE table_id = :current_table_id
@@ -163,18 +169,102 @@ def get_process_config(table_name:str, process_type:str) -> dict:
         return data
     
     except Exception as e:
-        logger.error(f"[get_process_config] FAILED | error={e}")
+        logger.error(f"[{inspect.currentframe().f_code.co_name}] FAILED | error={e}")
         raise
 
 
 
-# get_input_column_config 
-# This should be applicatable from Silver+ layers, not bronze & should return a dataframe. noyt dictionary
+# ----====[LOGGIN HELPER FUNC 3 : GET TABLE COLUMN CONFIG]=====-------------------------------------------------------
+@lru_cache(maxsize=128)
+def get_input_column_config(table_name:str, process_type:str) -> list[dict]:
+    """
+    Returns the table column config
+    """
+    try:
+        if process_type not in ["BRONZE", "SILVER", "GOLD"]:
+            raise ValueError(f"[get_input_column_config] Invalid process_type -'{process_type}'")
+
+        table_config = get_table_config(table_name, process_type = process_type)
+        table_id = table_config["table_id"]
+
+        df = spark.sql(f"""
+                            SELECT 
+                                column_id,
+                                table_id,
+                                process_type,
+                                source_column_name,
+                                target_column_name,
+                                data_type,
+                                is_nullable,
+                                is_pii,
+                                column_purpose,
+                                transform_expr
+                            FROM {INPUT_COLUMN_CONFIG}
+                            WHERE table_id = :table_id
+                            AND process_type = :process_type
+                            AND is_active = true
+                            ORDER BY column_id ASC
+                        """, args={"table_id": table_id, "process_type": process_type})
+
+        return [row.asDict() for row in df.collect()]
+
+    except Exception as e:
+        logger.error(f"[{inspect.currentframe().f_code.co_name}] FAILED | error={e}")
+        raise
 
 
-if __name__ == "__main__":
-    testing_table_name = "t_Client"
-    processing_table_details = get_table_config(table_name = testing_table_name)
-    print(processing_table_details)
-    processing_table_layer = get_process_config(processing_table_details['source_table_name'], process_type = 'BRONZE')
-    print(processing_table_layer)
+
+# ----====[LOGGIN HELPER FUNC 4 : GET TABLE WISE GROUPED COLUMN CONFIG]=====-------------------------------------------------------
+@lru_cache(maxsize=128)
+def get_column_purpose_groups(table_name: str, process_type: str) -> dict:
+    """
+    Returns columns grouped by column_purpose for a (table, layer).
+    
+    Returns dict:
+        {
+            'business_keys': [...],   # column_purpose = 'KEY'
+            'hash_cols':     [...],   # column_purpose = 'ATTRIBUTE'
+            'audit_cols':    [...],   # column_purpose = 'AUDIT'
+            'derived_cols':  [...]    # column_purpose = 'DERIVED'
+        }
+    
+    Each list contains target_column_name (falls back to source_column_name if NULL).
+    Filters is_active = true. Applicable for BRONZE / SILVER / GOLD.
+    """
+    try:
+        if process_type not in ['BRONZE', 'SILVER', 'GOLD']:
+            raise ValueError(f"Invalid process_type - '{process_type}'")
+        
+        config_rows = get_input_column_config(
+            table_name   = table_name,
+            process_type = process_type
+        )
+        
+        def target_name(r):
+            return r['target_column_name'] or r['source_column_name']
+        
+        groups = {
+            'business_keys': [target_name(r) for r in config_rows if r['column_purpose'] == 'KEY'],
+            'hash_cols':     [target_name(r) for r in config_rows if r['column_purpose'] == 'ATTRIBUTE'],
+            'audit_cols':    [target_name(r) for r in config_rows if r['column_purpose'] == 'AUDIT'],
+            'derived_cols':  [target_name(r) for r in config_rows if r['column_purpose'] == 'DERIVED'],
+        }
+        
+        return groups
+    
+    except Exception as e:
+        logger.error(f"[get_column_purpose_groups] FAILED | table={table_name} | layer={process_type} | error={e}")
+        raise
+    
+
+# if __name__ == "__main__":
+    # testing_table_name = "t_Client"
+#     processing_table_details = get_table_config(table_name = testing_table_name)
+#     print(processing_table_details)
+#     processing_table_layer = get_process_config(processing_table_details['source_table_name'], process_type = 'BRONZE')
+#     print(processing_table_layer)
+    # processing_table_columns = get_input_column_config(testing_table_name, process_type = 'SILVER')
+    # print(processing_table_columns)
+    # print(get_column_purpose_groups('t_Client', 'SILVER'))   # expect all 4 lists populated
+    # print(get_column_purpose_groups('t_Client', 'BRONZE'))   # expect empty lists or raise
+    # print(get_column_purpose_groups('t_BogusTable', 'SILVER'))  # expect raise
